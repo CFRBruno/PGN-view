@@ -332,14 +332,42 @@ def parse_pgn(pgn_bytes, player_name):
     return registros, ignoradas, total_lidas
 
 
+# ---------------------------------------------------------------------------
+# Ajuste estatístico (suavização de Dirichlet) para as taxas de V/E/D.
+#
+# Aberturas com poucas partidas podem mostrar taxas extremas (ex: 100% de
+# derrota em 1 partida) que não são estatisticamente confiáveis. O ajuste
+# abaixo "puxa" cada percentual em direção a uma base neutra (33,3% para
+# cada resultado) com força K — quanto mais partidas a abertura tiver, menos
+# esse puxão pesa, e o percentual ajustado se aproxima do percentual real.
+#
+# Fórmula (uma categoria i, entre V/E/D):
+#   % ajustado_i = (Nº de partidas com resultado i + K/3) / (Nº total + K)
+#
+# Isso garante que % Vitórias ajustado + % Empates ajustado + % Derrotas
+# ajustado somem sempre 100%, ao contrário de ajustar cada taxa de forma
+# independente.
+# ---------------------------------------------------------------------------
+K_SUAVIZACAO = 5
+
+
+def ajustar_percentual(n_resultado, n_total, k=K_SUAVIZACAO):
+    """Calcula o percentual ajustado (suavizado) de um resultado específico."""
+    return round((n_resultado + k / 3) / (n_total + k) * 100, 1)
+
+
 def compute_stats(registros, color):
     """
     Calcula as estatísticas de abertura para uma cor específica ("Brancas" ou
     "Pretas") a partir da lista de registros de partidas.
 
     Retorna um DataFrame ordenado por número de partidas (decrescente), com
-    colunas: Abertura, Lances, Nº de partidas, % do total, Vitórias, % Vitórias,
-    Empates, % Empates, Derrotas, % Derrotas.
+    colunas: Abertura, Lances, Nº de partidas, % do total, Vitórias,
+    % Vitórias, % Vitórias (ajustado), Empates, % Empates,
+    % Empates (ajustado), Derrotas, % Derrotas, % Derrotas (ajustado).
+    O percentual "ajustado" pondera a taxa pelo tamanho da amostra (veja
+    ajustar_percentual) para que aberturas com poucas partidas não pareçam
+    artificialmente melhores/piores do que aberturas com muitas partidas.
     """
     filtrados = [r for r in registros if r["cor"] == color]
     total = len(filtrados)
@@ -351,10 +379,13 @@ def compute_stats(registros, color):
         "% do total",
         "Vitórias",
         "% Vitórias",
+        "% Vitórias (ajustado)",
         "Empates",
         "% Empates",
+        "% Empates (ajustado)",
         "Derrotas",
         "% Derrotas",
+        "% Derrotas (ajustado)",
     ]
 
     if total == 0:
@@ -384,10 +415,13 @@ def compute_stats(registros, color):
                 "% do total": round(n_partidas / total * 100, 1),
                 "Vitórias": res["Vitória"],
                 "% Vitórias": pct(res["Vitória"]),
+                "% Vitórias (ajustado)": ajustar_percentual(res["Vitória"], n_partidas),
                 "Empates": res["Empate"],
                 "% Empates": pct(res["Empate"]),
+                "% Empates (ajustado)": ajustar_percentual(res["Empate"], n_partidas),
                 "Derrotas": res["Derrota"],
                 "% Derrotas": pct(res["Derrota"]),
+                "% Derrotas (ajustado)": ajustar_percentual(res["Derrota"], n_partidas),
             }
         )
 
@@ -401,6 +435,12 @@ def render_donut_grid(df, max_aberturas=6):
     em estilo "neon" sobre fundo escuro — um por abertura (as mais jogadas
     primeiro), mostrando a proporção de Vitórias (verde), Empates (cinza) e
     Derrotas (vermelho), com percentuais e os lances que definem a abertura.
+
+    Todo o HTML é montado SEM indentação nas linhas (cada linha começa na
+    coluna 0). Isso é necessário porque o parser de Markdown do Streamlit
+    trata qualquer linha com 4+ espaços de indentação como um bloco de código
+    literal, mesmo com unsafe_allow_html=True — foi isso que causava o bug
+    dos gráficos aparecendo como texto/código na tela.
     """
     df_top = df.head(max_aberturas)
     if df_top.empty:
@@ -430,63 +470,53 @@ def render_donut_grid(df, max_aberturas=6):
 
         titulo = html.escape(str(row["Abertura"]))
         lances = html.escape(str(row.get("Lances", "")) or "—")
+        rotulo_partidas = "partida" if n_partidas == 1 else "partidas"
 
-        cards_html.append(f"""
-        <div class="donut-card">
-          <div class="donut-circle" style="background:{gradiente};">
-            <div class="donut-hole">
-              <span class="donut-total">{int(n_partidas)}</span>
-              <span class="donut-total-label">partida{'s' if n_partidas != 1 else ''}</span>
-            </div>
-          </div>
-          <div class="donut-title">{titulo}</div>
-          <div class="donut-moves">{lances}</div>
-          <div class="donut-legend">
-            <span style="color:{COR_VITORIA}">&#9679; {pv:.0f}% V</span>
-            <span style="color:{COR_EMPATE}">&#9679; {pe:.0f}% E</span>
-            <span style="color:{COR_DERROTA}">&#9679; {pd_:.0f}% D</span>
-          </div>
-        </div>
-        """)
+        # Cada linha do card começa na coluna 0 de propósito (ver docstring)
+        card_lines = [
+            '<div class="donut-card">',
+            f'<div class="donut-circle" style="background:{gradiente};">',
+            '<div class="donut-hole">',
+            f'<span class="donut-total">{int(n_partidas)}</span>',
+            f'<span class="donut-total-label">{rotulo_partidas}</span>',
+            "</div>",
+            "</div>",
+            f'<div class="donut-title">{titulo}</div>',
+            f'<div class="donut-moves">{lances}</div>',
+            '<div class="donut-legend">',
+            f'<span style="color:{COR_VITORIA}">&#9679; {pv:.0f}% V</span>',
+            f'<span style="color:{COR_EMPATE}">&#9679; {pe:.0f}% E</span>',
+            f'<span style="color:{COR_DERROTA}">&#9679; {pd_:.0f}% D</span>',
+            "</div>",
+            "</div>",
+        ]
+        cards_html.append("".join(card_lines))
 
     if not cards_html:
         return
 
-    estilo = f"""
-    <style>
-    .donut-grid {{
-        display: flex; flex-wrap: wrap; gap: 18px; margin: 8px 0 24px 0;
-    }}
-    .donut-card {{
-        background: {COR_FUNDO}; border: 1px solid #2a2e39; border-radius: 14px;
-        padding: 16px; width: 190px; display: flex; flex-direction: column;
-        align-items: center; box-shadow: 0 0 16px rgba(57, 255, 20, 0.06);
-    }}
-    .donut-circle {{
-        width: 128px; height: 128px; border-radius: 50%;
-        display: flex; align-items: center; justify-content: center;
-        box-shadow: 0 0 14px 1px rgba(255, 255, 255, 0.08);
-    }}
-    .donut-hole {{
-        width: 76px; height: 76px; background: {COR_FUNDO}; border-radius: 50%;
-        display: flex; flex-direction: column; align-items: center; justify-content: center;
-    }}
-    .donut-total {{ color: white; font-weight: 700; font-size: 18px; line-height: 1.1; }}
-    .donut-total-label {{ color: #9aa0a6; font-size: 10px; }}
-    .donut-title {{
-        color: white; font-size: 13px; font-weight: 600; text-align: center;
-        margin-top: 10px; min-height: 34px;
-    }}
-    .donut-moves {{
-        color: #9aa0a6; font-size: 11px; font-family: "Courier New", monospace;
-        text-align: center; margin-top: 4px; min-height: 30px;
-    }}
-    .donut-legend {{
-        display: flex; gap: 8px; margin-top: 8px; font-size: 11px; color: #ddd;
-        white-space: nowrap;
-    }}
-    </style>
-    """
+    estilo_linhas = [
+        "<style>",
+        ".donut-grid { display: flex; flex-wrap: wrap; gap: 18px; margin: 8px 0 24px 0; }",
+        f'.donut-card {{ background: {COR_FUNDO}; border: 1px solid #2a2e39; border-radius: 14px; '
+        "padding: 16px; width: 190px; display: flex; flex-direction: column; "
+        "align-items: center; box-shadow: 0 0 16px rgba(57, 255, 20, 0.06); }",
+        ".donut-circle { width: 128px; height: 128px; border-radius: 50%; "
+        "display: flex; align-items: center; justify-content: center; "
+        "box-shadow: 0 0 14px 1px rgba(255, 255, 255, 0.08); }",
+        f'.donut-hole {{ width: 76px; height: 76px; background: {COR_FUNDO}; border-radius: 50%; '
+        "display: flex; flex-direction: column; align-items: center; justify-content: center; }",
+        ".donut-total { color: white; font-weight: 700; font-size: 18px; line-height: 1.1; }",
+        ".donut-total-label { color: #9aa0a6; font-size: 10px; }",
+        ".donut-title { color: white; font-size: 13px; font-weight: 600; text-align: center; "
+        "margin-top: 10px; min-height: 34px; }",
+        '.donut-moves { color: #9aa0a6; font-size: 11px; font-family: "Courier New", monospace; '
+        "text-align: center; margin-top: 4px; min-height: 30px; }",
+        ".donut-legend { display: flex; gap: 8px; margin-top: 8px; font-size: 11px; color: #ddd; "
+        "white-space: nowrap; }",
+        "</style>",
+    ]
+    estilo = "".join(estilo_linhas)
     grid = '<div class="donut-grid">' + "".join(cards_html) + "</div>"
     st.markdown(estilo + grid, unsafe_allow_html=True)
 
@@ -501,6 +531,12 @@ def render_color_section(color, df, total):
         return
 
     st.caption(f"Total de {total} partida(s) analisada(s).")
+    st.caption(
+        "As colunas \"(ajustado)\" ponderam a taxa pelo número de partidas "
+        "(quanto menos partidas, mais o percentual é puxado para perto de 33,3%) "
+        "— evita que uma abertura com poucas partidas pareça melhor/pior do que "
+        "realmente é. Clique no cabeçalho de qualquer coluna para ordenar por ela."
+    )
     st.dataframe(df, use_container_width=True, hide_index=True)
 
     # Gráfico de barras: partidas por abertura (top 10)
