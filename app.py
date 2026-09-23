@@ -12,12 +12,11 @@ Como rodar:
 """
 
 import io
-import math
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 import chess
 import chess.pgn
-import matplotlib.pyplot as plt
+import html
 import pandas as pd
 import streamlit as st
 
@@ -220,6 +219,23 @@ def identify_opening_by_moves(moves_san):
     return "Abertura desconhecida"
 
 
+def format_move_sequence(moves_san, max_plies=8):
+    """
+    Formata os primeiros lances de uma partida no estilo PGN legível,
+    ex: "1.e4 e5 2.Nf3 Nc6 3.Bc4 Bc5" — usado para mostrar ao lado do nome
+    da abertura os lances que efetivamente a definem naquela partida.
+    """
+    trimmed = moves_san[:max_plies]
+    partes = []
+    for i, lance in enumerate(trimmed):
+        if i % 2 == 0:
+            numero = i // 2 + 1
+            partes.append(f"{numero}.{lance}")
+        else:
+            partes.append(lance)
+    return " ".join(partes)
+
+
 def parse_pgn(pgn_bytes, player_name):
     """
     Faz o parsing de um arquivo PGN (em bytes) contendo uma ou mais partidas,
@@ -309,6 +325,7 @@ def parse_pgn(pgn_bytes, player_name):
                 "cor": color,
                 "abertura": opening_name,
                 "resultado": outcome,
+                "lances": format_move_sequence(moves_san),
             }
         )
 
@@ -321,7 +338,7 @@ def compute_stats(registros, color):
     "Pretas") a partir da lista de registros de partidas.
 
     Retorna um DataFrame ordenado por número de partidas (decrescente), com
-    colunas: Abertura, Nº de partidas, % do total, Vitórias, % Vitórias,
+    colunas: Abertura, Lances, Nº de partidas, % do total, Vitórias, % Vitórias,
     Empates, % Empates, Derrotas, % Derrotas.
     """
     filtrados = [r for r in registros if r["cor"] == color]
@@ -329,6 +346,7 @@ def compute_stats(registros, color):
 
     colunas = [
         "Abertura",
+        "Lances",
         "Nº de partidas",
         "% do total",
         "Vitórias",
@@ -343,16 +361,25 @@ def compute_stats(registros, color):
         return pd.DataFrame(columns=colunas), 0
 
     contagem = defaultdict(lambda: {"Vitória": 0, "Empate": 0, "Derrota": 0})
+    lances_por_abertura = defaultdict(list)
     for r in filtrados:
         contagem[r["abertura"]][r["resultado"]] += 1
+        lances_por_abertura[r["abertura"]].append(r.get("lances", ""))
 
     linhas = []
     for abertura, res in contagem.items():
         n_partidas = res["Vitória"] + res["Empate"] + res["Derrota"]
         pct = lambda n: round(n / n_partidas * 100, 1) if n_partidas else 0.0
+
+        # Usa a sequência de lances mais frequente entre as partidas dessa
+        # abertura como representativa (a "linha principal" jogada por ela)
+        lances_validos = [l for l in lances_por_abertura[abertura] if l]
+        lances_repr = Counter(lances_validos).most_common(1)[0][0] if lances_validos else ""
+
         linhas.append(
             {
                 "Abertura": abertura,
+                "Lances": lances_repr,
                 "Nº de partidas": n_partidas,
                 "% do total": round(n_partidas / total * 100, 1),
                 "Vitórias": res["Vitória"],
@@ -370,74 +397,98 @@ def compute_stats(registros, color):
 
 def render_donut_grid(df, max_aberturas=6):
     """
-    Desenha uma grade de gráficos de rosca (donut) em estilo "neon" sobre fundo
-    escuro, um por abertura (as mais jogadas primeiro), mostrando a proporção
-    de Vitórias (verde), Empates (cinza) e Derrotas (vermelho) com percentuais.
+    Desenha uma grade de gráficos de rosca (donut) em CSS puro (conic-gradient),
+    em estilo "neon" sobre fundo escuro — um por abertura (as mais jogadas
+    primeiro), mostrando a proporção de Vitórias (verde), Empates (cinza) e
+    Derrotas (vermelho), com percentuais e os lances que definem a abertura.
     """
     df_top = df.head(max_aberturas)
-    n = len(df_top)
-    if n == 0:
+    if df_top.empty:
         return
 
-    ncols = 3 if n >= 3 else n
-    nrows = math.ceil(n / ncols)
-
-    fig, axes = plt.subplots(
-        nrows, ncols, figsize=(4 * ncols, 4.3 * nrows), facecolor=COR_FUNDO
-    )
-    # Normaliza `axes` para sempre ser uma lista 1D, independente de nrows/ncols
-    if n == 1:
-        axes_list = [axes]
-    else:
-        axes_list = axes.flatten() if hasattr(axes, "flatten") else list(axes)
-
-    for i, ax in enumerate(axes_list):
-        ax.set_facecolor(COR_FUNDO)
-        if i >= n:
-            ax.axis("off")  # esconde eixos vazios sobrando na grade
+    cards_html = []
+    for _, row in df_top.iterrows():
+        v, e, d = row["Vitórias"], row["Empates"], row["Derrotas"]
+        n_partidas = v + e + d
+        if n_partidas == 0:
             continue
 
-        row = df_top.iloc[i]
-        valores = [row["Vitórias"], row["Empates"], row["Derrotas"]]
-        cores = [COR_VITORIA, COR_EMPATE, COR_DERROTA]
+        pv = v / n_partidas * 100
+        pe = e / n_partidas * 100
+        # pd_ (percentual de derrotas) fecha os 100% restantes do círculo
+        pd_ = 100 - pv - pe
 
-        # Remove fatias com 0 partidas para não poluir o gráfico
-        valores_validos = [(v, c) for v, c in zip(valores, cores) if v > 0]
-        if not valores_validos:
-            ax.axis("off")
-            continue
-        vals, cols = zip(*valores_validos)
-
-        wedges, _texts, autotexts = ax.pie(
-            vals,
-            colors=cols,
-            autopct="%1.0f%%",
-            pctdistance=0.78,
-            startangle=90,
-            wedgeprops=dict(width=0.42, edgecolor=COR_FUNDO, linewidth=2),
-            textprops=dict(color="white", fontsize=11, fontweight="bold"),
+        # conic-gradient desenha o círculo repartindo os graus proporcionalmente
+        # a cada faixa de percentual acumulado: verde -> cinza -> vermelho
+        fim_verde = pv
+        fim_cinza = pv + pe
+        gradiente = (
+            f"conic-gradient({COR_VITORIA} 0% {fim_verde:.2f}%, "
+            f"{COR_EMPATE} {fim_verde:.2f}% {fim_cinza:.2f}%, "
+            f"{COR_DERROTA} {fim_cinza:.2f}% 100%)"
         )
-        # Número de partidas no centro da rosca
-        ax.text(
-            0, 0, f"{int(row['Nº de partidas'])}\npart.",
-            ha="center", va="center", color="white", fontsize=12, fontweight="bold",
-        )
-        titulo = row["Abertura"]
-        if len(titulo) > 32:
-            titulo = titulo[:29] + "..."
-        ax.set_title(titulo, color="white", fontsize=11, pad=10)
 
-    fig.tight_layout()
-    st.pyplot(fig, use_container_width=True)
-    plt.close(fig)
+        titulo = html.escape(str(row["Abertura"]))
+        lances = html.escape(str(row.get("Lances", "")) or "—")
 
-    # Legenda de cores, já que os gráficos ficam lado a lado
-    st.markdown(
-        f"<span style='color:{COR_VITORIA}'>&#9679;</span> Vitória &nbsp;&nbsp;"
-        f"<span style='color:{COR_EMPATE}'>&#9679;</span> Empate &nbsp;&nbsp;"
-        f"<span style='color:{COR_DERROTA}'>&#9679;</span> Derrota",
-        unsafe_allow_html=True,
-    )
+        cards_html.append(f"""
+        <div class="donut-card">
+          <div class="donut-circle" style="background:{gradiente};">
+            <div class="donut-hole">
+              <span class="donut-total">{int(n_partidas)}</span>
+              <span class="donut-total-label">partida{'s' if n_partidas != 1 else ''}</span>
+            </div>
+          </div>
+          <div class="donut-title">{titulo}</div>
+          <div class="donut-moves">{lances}</div>
+          <div class="donut-legend">
+            <span style="color:{COR_VITORIA}">&#9679; {pv:.0f}% V</span>
+            <span style="color:{COR_EMPATE}">&#9679; {pe:.0f}% E</span>
+            <span style="color:{COR_DERROTA}">&#9679; {pd_:.0f}% D</span>
+          </div>
+        </div>
+        """)
+
+    if not cards_html:
+        return
+
+    estilo = f"""
+    <style>
+    .donut-grid {{
+        display: flex; flex-wrap: wrap; gap: 18px; margin: 8px 0 24px 0;
+    }}
+    .donut-card {{
+        background: {COR_FUNDO}; border: 1px solid #2a2e39; border-radius: 14px;
+        padding: 16px; width: 190px; display: flex; flex-direction: column;
+        align-items: center; box-shadow: 0 0 16px rgba(57, 255, 20, 0.06);
+    }}
+    .donut-circle {{
+        width: 128px; height: 128px; border-radius: 50%;
+        display: flex; align-items: center; justify-content: center;
+        box-shadow: 0 0 14px 1px rgba(255, 255, 255, 0.08);
+    }}
+    .donut-hole {{
+        width: 76px; height: 76px; background: {COR_FUNDO}; border-radius: 50%;
+        display: flex; flex-direction: column; align-items: center; justify-content: center;
+    }}
+    .donut-total {{ color: white; font-weight: 700; font-size: 18px; line-height: 1.1; }}
+    .donut-total-label {{ color: #9aa0a6; font-size: 10px; }}
+    .donut-title {{
+        color: white; font-size: 13px; font-weight: 600; text-align: center;
+        margin-top: 10px; min-height: 34px;
+    }}
+    .donut-moves {{
+        color: #9aa0a6; font-size: 11px; font-family: "Courier New", monospace;
+        text-align: center; margin-top: 4px; min-height: 30px;
+    }}
+    .donut-legend {{
+        display: flex; gap: 8px; margin-top: 8px; font-size: 11px; color: #ddd;
+        white-space: nowrap;
+    }}
+    </style>
+    """
+    grid = '<div class="donut-grid">' + "".join(cards_html) + "</div>"
+    st.markdown(estilo + grid, unsafe_allow_html=True)
 
 
 def render_color_section(color, df, total):
