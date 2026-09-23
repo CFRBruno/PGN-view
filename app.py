@@ -21,12 +21,17 @@ import pandas as pd
 import streamlit as st
 
 # ---------------------------------------------------------------------------
-# Paleta "neon" usada nos gráficos de rosca (donut) de V/E/D.
+# Paleta de cores da interface — tons modernos e suaves (não neon puro),
+# confortáveis para leitura prolongada sobre fundo escuro.
 # ---------------------------------------------------------------------------
-COR_VITORIA = "#39FF14"   # verde neon
-COR_EMPATE = "#D9D9D9"    # cinza claro (neutro, contrasta bem no fundo escuro)
-COR_DERROTA = "#FF1B4C"   # vermelho/rosa neon
-COR_FUNDO = "#0E1117"     # combina com o tema escuro padrão do Streamlit
+COR_VITORIA = "#34D399"    # verde esmeralda suave
+COR_EMPATE = "#94A3B8"     # cinza-azulado suave
+COR_DERROTA = "#FB7185"    # rosa/coral suave
+COR_FUNDO = "#161B22"      # fundo escuro (não preto puro)
+COR_CARD_BORDA = "#2A3140"
+COR_TEXTO_SECUNDARIO = "#9CA3AF"
+COR_TRILHA_BARRA = "#232935"   # fundo (trilha) das barras horizontais
+COR_ACCENT = "#60A5FA"     # azul suave, usado nas barras de frequência de aberturas
 
 # ---------------------------------------------------------------------------
 # Tabela de fallback: mapeia sequências iniciais de lances (em SAN, separados
@@ -236,6 +241,56 @@ def format_move_sequence(moves_san, max_plies=8):
     return " ".join(partes)
 
 
+def categorizar_metodo_por_texto(termination_text):
+    """
+    Categoriza o método de finalização a partir do texto da tag PGN
+    'Termination' (usada quando o tabuleiro final não é suficiente para
+    identificar o método sozinho — ex: desistência, tempo, acordo mútuo).
+    É uma busca por palavras-chave, já que o formato varia entre plataformas
+    (Chess.com, Lichess etc.).
+    """
+    if not termination_text:
+        return "Não informado"
+    t = termination_text.lower()
+    if "time" in t:
+        return "Tempo (flag caiu)"
+    if "resign" in t:
+        return "Desistência"
+    if "abandon" in t:
+        return "Abandono"
+    if "agree" in t:
+        return "Acordo mútuo"
+    if "50" in t or "fifty" in t:
+        return "Regra dos 50 lances"
+    if "infraction" in t or "disqualif" in t or "cheat" in t or "rules" in t:
+        return "Infração/Desqualificação"
+    if t.strip() == "normal":
+        return "Não especificado"
+    return "Outro"
+
+
+def determinar_metodo(board, termination_text):
+    """
+    Determina o método de finalização da partida. Prioriza o estado final
+    real do tabuleiro (xeque-mate, afogamento, material insuficiente,
+    repetição/75 lances automáticos) — que é 100% confiável, pois vem do
+    replay real dos lances — e só recorre ao texto da tag Termination do
+    PGN para os casos que o tabuleiro sozinho não revela (desistência,
+    tempo esgotado, acordo mútuo, abandono).
+    """
+    if board.is_checkmate():
+        return "Xeque-mate"
+    if board.is_stalemate():
+        return "Afogamento"
+    if board.is_insufficient_material():
+        return "Material insuficiente"
+    if board.is_seventyfive_moves():
+        return "Regra dos 75 lances"
+    if board.is_fivefold_repetition():
+        return "Repetição de posição"
+    return categorizar_metodo_por_texto(termination_text)
+
+
 def parse_pgn(pgn_bytes, player_name):
     """
     Faz o parsing de um arquivo PGN (em bytes) contendo uma ou mais partidas,
@@ -320,12 +375,16 @@ def parse_pgn(pgn_bytes, player_name):
             ignoradas["sem_abertura_e_sem_lances"] += 1
             continue
 
+        # Identifica como a partida terminou (xeque-mate, tempo, abandono etc.)
+        metodo = determinar_metodo(board, headers.get("Termination", "").strip())
+
         registros.append(
             {
                 "cor": color,
                 "abertura": opening_name,
                 "resultado": outcome,
                 "lances": format_move_sequence(moves_san),
+                "metodo": metodo,
             }
         )
 
@@ -429,6 +488,37 @@ def compute_stats(registros, color):
     return df, total
 
 
+def compute_method_stats(registros, color):
+    """
+    Agrega, para uma cor específica, como as vitórias, empates e derrotas
+    terminaram (xeque-mate, tempo, abandono, afogamento etc.), somando todas
+    as aberturas juntas.
+
+    Retorna um dict {"Vitória": {...}, "Empate": {...}, "Derrota": {...}},
+    onde cada valor é {"total": N, "itens": [{"metodo", "n", "pct"}, ...]}
+    ordenado do método mais comum para o menos comum.
+    """
+    filtrados = [r for r in registros if r["cor"] == color]
+    por_resultado = defaultdict(Counter)
+    for r in filtrados:
+        por_resultado[r["resultado"]][r.get("metodo", "Não informado")] += 1
+
+    saida = {}
+    for resultado in ("Vitória", "Empate", "Derrota"):
+        contagem = por_resultado.get(resultado, Counter())
+        total_resultado = sum(contagem.values())
+        itens = [
+            {
+                "metodo": metodo,
+                "n": n,
+                "pct": round(n / total_resultado * 100, 1) if total_resultado else 0.0,
+            }
+            for metodo, n in contagem.most_common()
+        ]
+        saida[resultado] = {"total": total_resultado, "itens": itens}
+    return saida
+
+
 def render_donut_grid(df, max_aberturas=6):
     """
     Desenha uma grade de gráficos de rosca (donut) em CSS puro (conic-gradient),
@@ -498,19 +588,18 @@ def render_donut_grid(df, max_aberturas=6):
     estilo_linhas = [
         "<style>",
         ".donut-grid { display: flex; flex-wrap: wrap; gap: 18px; margin: 8px 0 24px 0; }",
-        f'.donut-card {{ background: {COR_FUNDO}; border: 1px solid #2a2e39; border-radius: 14px; '
+        f'.donut-card {{ background: {COR_FUNDO}; border: 1px solid {COR_CARD_BORDA}; border-radius: 16px; '
         "padding: 16px; width: 190px; display: flex; flex-direction: column; "
-        "align-items: center; box-shadow: 0 0 16px rgba(57, 255, 20, 0.06); }",
+        "align-items: center; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.30); }",
         ".donut-circle { width: 128px; height: 128px; border-radius: 50%; "
-        "display: flex; align-items: center; justify-content: center; "
-        "box-shadow: 0 0 14px 1px rgba(255, 255, 255, 0.08); }",
+        "display: flex; align-items: center; justify-content: center; }",
         f'.donut-hole {{ width: 76px; height: 76px; background: {COR_FUNDO}; border-radius: 50%; '
         "display: flex; flex-direction: column; align-items: center; justify-content: center; }",
         ".donut-total { color: white; font-weight: 700; font-size: 18px; line-height: 1.1; }",
-        ".donut-total-label { color: #9aa0a6; font-size: 10px; }",
+        f'.donut-total-label {{ color: {COR_TEXTO_SECUNDARIO}; font-size: 10px; }}',
         ".donut-title { color: white; font-size: 13px; font-weight: 600; text-align: center; "
         "margin-top: 10px; min-height: 34px; }",
-        '.donut-moves { color: #9aa0a6; font-size: 11px; font-family: "Courier New", monospace; '
+        f'.donut-moves {{ color: {COR_TEXTO_SECUNDARIO}; font-size: 11px; font-family: "Courier New", monospace; '
         "text-align: center; margin-top: 4px; min-height: 30px; }",
         ".donut-legend { display: flex; gap: 8px; margin-top: 8px; font-size: 11px; color: #ddd; "
         "white-space: nowrap; }",
@@ -521,7 +610,77 @@ def render_donut_grid(df, max_aberturas=6):
     st.markdown(estilo + grid, unsafe_allow_html=True)
 
 
-def render_color_section(color, df, total):
+def render_barras_horizontais(itens, cor_barra, unidade=""):
+    """
+    Desenha uma lista de barras horizontais em CSS puro — usada tanto para
+    "aberturas mais usadas" quanto para "métodos de finalização". Muito mais
+    legível que um gráfico de colunas quando os rótulos (nomes de aberturas,
+    métodos) são longos, pois o texto fica na horizontal, sem cortar/rotacionar.
+
+    `itens`: lista de dicts {"label": str, "valor": num, "pct": num}
+    `cor_barra`: cor de preenchimento das barras
+    `unidade`: texto mostrado ao lado do valor (ex: "partidas")
+    """
+    if not itens:
+        return
+    maior_valor = max(item["valor"] for item in itens) or 1
+
+    linhas = ["<style>",
+        ".barra-lista { display: flex; flex-direction: column; gap: 10px; margin: 10px 0 22px 0; }",
+        ".barra-item { display: flex; align-items: center; gap: 12px; }",
+        ".barra-label { width: 220px; flex-shrink: 0; color: #E5E7EB; font-size: 13px; "
+        "white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }",
+        f'.barra-track {{ flex: 1; background: {COR_TRILHA_BARRA}; border-radius: 8px; height: 16px; overflow: hidden; }}',
+        ".barra-fill { height: 100%; border-radius: 8px; }",
+        f'.barra-valor {{ min-width: 92px; text-align: right; color: {COR_TEXTO_SECUNDARIO}; font-size: 12px; white-space: nowrap; }}',
+        "</style>"]
+
+    linhas.append('<div class="barra-lista">')
+    for item in itens:
+        largura_pct = max(item["valor"] / maior_valor * 100, 3)  # mínimo visível
+        label = html.escape(str(item["label"]))
+        texto_valor = f'{item["valor"]}{unidade}'
+        if "pct" in item:
+            texto_valor += f' &middot; {item["pct"]:.1f}%'
+        linhas.append('<div class="barra-item">')
+        linhas.append(f'<div class="barra-label" title="{label}">{label}</div>')
+        linhas.append('<div class="barra-track">')
+        linhas.append(f'<div class="barra-fill" style="width:{largura_pct:.1f}%; background:{cor_barra};"></div>')
+        linhas.append("</div>")
+        linhas.append(f'<div class="barra-valor">{texto_valor}</div>')
+        linhas.append("</div>")
+    linhas.append("</div>")
+
+    st.markdown("".join(linhas), unsafe_allow_html=True)
+
+
+def render_metodos_section(method_stats):
+    """
+    Renderiza, para uma cor já filtrada, como vitórias/empates/derrotas
+    terminaram (xeque-mate, tempo, abandono etc.), uma seção por resultado.
+    """
+    rotulos = {
+        "Vitória": ("🏆 Como as vitórias aconteceram", COR_VITORIA),
+        "Empate": ("⚖️ Como os empates aconteceram", COR_EMPATE),
+        "Derrota": ("💀 Como as derrotas aconteceram", COR_DERROTA),
+    }
+    colunas = st.columns(3)
+    for coluna, resultado in zip(colunas, ("Vitória", "Empate", "Derrota")):
+        titulo, cor = rotulos[resultado]
+        dados = method_stats.get(resultado, {"total": 0, "itens": []})
+        with coluna:
+            st.markdown(f"**{titulo}**")
+            if dados["total"] == 0:
+                st.caption("Sem dados.")
+                continue
+            itens = [
+                {"label": item["metodo"], "valor": item["n"], "pct": item["pct"]}
+                for item in dados["itens"]
+            ]
+            render_barras_horizontais(itens, cor_barra=cor)
+
+
+def render_color_section(color, df, total, method_stats):
     """Renderiza a seção de estatísticas (tabela + gráficos) para uma cor."""
     emoji = "⚪" if color == "Brancas" else "⚫"
     st.subheader(f"{emoji} Jogando de {color}")
@@ -539,16 +698,25 @@ def render_color_section(color, df, total):
     )
     st.dataframe(df, use_container_width=True, hide_index=True)
 
-    # Gráfico de barras: partidas por abertura (top 10)
-    top_freq = df.head(10).set_index("Abertura")["Nº de partidas"]
+    # Frequência de uso das aberturas: barras horizontais em CSS (mais legível
+    # que um gráfico de colunas quando os nomes das aberturas são longos)
     st.markdown("**Aberturas mais usadas**")
-    st.bar_chart(top_freq)
+    top_freq = df.head(10)
+    itens_freq = [
+        {"label": row["Abertura"], "valor": int(row["Nº de partidas"]), "pct": row["% do total"]}
+        for _, row in top_freq.iterrows()
+    ]
+    render_barras_horizontais(itens_freq, cor_barra=COR_ACCENT, unidade=" partidas")
 
-    # Gráficos de rosca (donut) neon: proporção de V/E/D nas aberturas mais usadas
+    # Gráficos de rosca (donut): proporção de V/E/D nas aberturas mais usadas
     st.markdown("**Desempenho por abertura (Vitória / Empate / Derrota)**")
     if len(df) > 6:
         st.caption("Mostrando as 6 aberturas mais jogadas.")
     render_donut_grid(df)
+
+    # Como as partidas terminaram (xeque-mate, tempo, abandono etc.)
+    st.markdown("**Método de finalização**")
+    render_metodos_section(method_stats)
 
 
 def main():
@@ -605,10 +773,12 @@ def main():
 
     df_brancas, total_brancas = compute_stats(registros, "Brancas")
     df_pretas, total_pretas = compute_stats(registros, "Pretas")
+    metodos_brancas = compute_method_stats(registros, "Brancas")
+    metodos_pretas = compute_method_stats(registros, "Pretas")
 
-    render_color_section("Brancas", df_brancas, total_brancas)
+    render_color_section("Brancas", df_brancas, total_brancas, metodos_brancas)
     st.divider()
-    render_color_section("Pretas", df_pretas, total_pretas)
+    render_color_section("Pretas", df_pretas, total_pretas, metodos_pretas)
 
 
 if __name__ == "__main__":
