@@ -12,12 +12,22 @@ Como rodar:
 """
 
 import io
+import math
 from collections import defaultdict
 
 import chess
 import chess.pgn
+import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
+
+# ---------------------------------------------------------------------------
+# Paleta "neon" usada nos gráficos de rosca (donut) de V/E/D.
+# ---------------------------------------------------------------------------
+COR_VITORIA = "#39FF14"   # verde neon
+COR_EMPATE = "#D9D9D9"    # cinza claro (neutro, contrasta bem no fundo escuro)
+COR_DERROTA = "#FF1B4C"   # vermelho/rosa neon
+COR_FUNDO = "#0E1117"     # combina com o tema escuro padrão do Streamlit
 
 # ---------------------------------------------------------------------------
 # Tabela de fallback: mapeia sequências iniciais de lances (em SAN, separados
@@ -86,6 +96,107 @@ OPENING_FALLBACK_TABLE = {
 _SORTED_FALLBACK_KEYS = sorted(
     OPENING_FALLBACK_TABLE.keys(), key=lambda k: len(k.split()), reverse=True
 )
+
+# ---------------------------------------------------------------------------
+# Tradução de código ECO -> nome da abertura, usada quando o PGN tem a tag
+# ECO mas não tem a tag Opening (comum em exports do Chess.com).
+# Primeiro tenta um código exato bem conhecido; se não achar, cai para uma
+# faixa de códigos (ex: C60-C99 = Ruy Lopez) que cobre TODO o espectro do ECO
+# com um nome genérico razoável. Isso evita mostrar só "ECO C50" ao usuário.
+#
+# Se você (usuário) tiver nomes mais específicos para algum código que caiu
+# na faixa genérica, é só me passar o código ECO + nome que eu adiciono aqui.
+# ---------------------------------------------------------------------------
+ECO_EXACT_NAMES = {
+    "A01": "Ataque Nimzowitsch-Larsen",
+    "A02": "Abertura Bird",
+    "A03": "Abertura Bird",
+    "A04": "Abertura Réti",
+    "A05": "Abertura Réti",
+    "A07": "Réti com fianchetto do rei",
+    "A10": "Abertura Inglesa",
+    "A80": "Defesa Holandesa",
+    "B01": "Defesa Escandinava",
+    "B02": "Defesa Alekhine",
+    "B06": "Defesa Moderna",
+    "B07": "Defesa Pirc",
+    "B10": "Defesa Caro-Kann",
+    "B20": "Defesa Siciliana",
+    "B90": "Defesa Siciliana Najdorf",
+    "B92": "Defesa Siciliana Najdorf (variante Zagreb)",
+    "C00": "Defesa Francesa",
+    "C20": "Abertura do Peão do Rei",
+    "C25": "Abertura Viena",
+    "C30": "Gambito do Rei",
+    "C42": "Defesa Petrov",
+    "C44": "Abertura Escocesa",
+    "C45": "Gambito Escocês",
+    "C50": "Abertura Italiana",
+    "C60": "Ruy Lopez (Espanhola)",
+    "D00": "Abertura da Dama",
+    "D06": "Gambito da Dama",
+    "D10": "Defesa Eslava",
+    "D20": "Gambito da Dama Aceito",
+    "D30": "Gambito da Dama Recusado",
+    "D70": "Defesa Grünfeld",
+    "E00": "Abertura Catalã",
+    "E10": "Defesa Índia da Dama",
+    "E20": "Defesa Nimzo-Índia",
+    "E60": "Defesa Índia do Rei",
+}
+
+# Faixas de códigos ECO (letra + intervalo numérico) -> nome genérico.
+# Cobre o código A00-E99 inteiro, garantindo que sempre haja um nome.
+ECO_RANGE_NAMES = [
+    ("A", 0, 9, "Abertura Irregular / de Flanco"),
+    ("A", 10, 39, "Abertura Inglesa"),
+    ("A", 40, 44, "Abertura de Peão de Dama (irregular)"),
+    ("A", 45, 49, "Defesa Índia (genérica)"),
+    ("A", 50, 79, "Defesa Benoni / Índia"),
+    ("A", 80, 99, "Defesa Holandesa"),
+    ("B", 0, 0, "Abertura de Peão de Rei (irregular)"),
+    ("B", 1, 5, "Defesa Escandinava / Alekhine"),
+    ("B", 6, 9, "Defesa Pirc / Moderna"),
+    ("B", 10, 19, "Defesa Caro-Kann"),
+    ("B", 20, 99, "Defesa Siciliana"),
+    ("C", 0, 19, "Defesa Francesa"),
+    ("C", 20, 29, "Abertura do Peão do Rei / Viena"),
+    ("C", 30, 39, "Gambito do Rei"),
+    ("C", 40, 49, "Abertura dos Cavalos do Rei"),
+    ("C", 50, 59, "Abertura Italiana"),
+    ("C", 60, 99, "Ruy Lopez (Espanhola)"),
+    ("D", 0, 5, "Abertura da Dama"),
+    ("D", 6, 9, "Gambito da Dama (linhas variadas)"),
+    ("D", 10, 19, "Defesa Eslava"),
+    ("D", 20, 29, "Gambito da Dama Aceito"),
+    ("D", 30, 69, "Gambito da Dama Recusado"),
+    ("D", 70, 99, "Defesa Grünfeld"),
+    ("E", 0, 9, "Abertura Catalã"),
+    ("E", 10, 19, "Defesa Índia da Dama"),
+    ("E", 20, 59, "Defesa Nimzo-Índia"),
+    ("E", 60, 99, "Defesa Índia do Rei"),
+]
+
+
+def eco_to_name(eco):
+    """
+    Converte um código ECO (ex: 'C50') no nome da abertura correspondente.
+    Retorna None se o código não tiver o formato esperado (letra A-E + 2 dígitos).
+    """
+    if not eco or len(eco) < 3 or eco[0] not in "ABCDE":
+        return None
+    try:
+        num = int(eco[1:3])
+    except ValueError:
+        return None
+
+    if eco in ECO_EXACT_NAMES:
+        return ECO_EXACT_NAMES[eco]
+
+    for letra, lo, hi, nome in ECO_RANGE_NAMES:
+        if eco[0] == letra and lo <= num <= hi:
+            return nome
+    return None
 
 
 def identify_opening_by_moves(moves_san):
@@ -183,7 +294,10 @@ def parse_pgn(pgn_bytes, player_name):
         if opening_tag:
             opening_name = f"{opening_tag}" + (f" ({eco})" if eco else "")
         elif eco:
-            opening_name = f"ECO {eco}"
+            # PGN tem o código ECO mas não o nome (comum em exports do Chess.com):
+            # traduz o código para um nome de abertura em vez de mostrar só "ECO C50"
+            nome_eco = eco_to_name(eco)
+            opening_name = f"{nome_eco} ({eco})" if nome_eco else f"ECO {eco}"
         elif moves_san:
             opening_name = identify_opening_by_moves(moves_san)
         else:
@@ -207,24 +321,26 @@ def compute_stats(registros, color):
     "Pretas") a partir da lista de registros de partidas.
 
     Retorna um DataFrame ordenado por número de partidas (decrescente), com
-    colunas: Abertura, Nº de partidas, % do total, Vitórias, Empates,
-    Derrotas, Taxa de vitória (%).
+    colunas: Abertura, Nº de partidas, % do total, Vitórias, % Vitórias,
+    Empates, % Empates, Derrotas, % Derrotas.
     """
     filtrados = [r for r in registros if r["cor"] == color]
     total = len(filtrados)
 
+    colunas = [
+        "Abertura",
+        "Nº de partidas",
+        "% do total",
+        "Vitórias",
+        "% Vitórias",
+        "Empates",
+        "% Empates",
+        "Derrotas",
+        "% Derrotas",
+    ]
+
     if total == 0:
-        return pd.DataFrame(
-            columns=[
-                "Abertura",
-                "Nº de partidas",
-                "% do total",
-                "Vitórias",
-                "Empates",
-                "Derrotas",
-                "Taxa de vitória (%)",
-            ]
-        ), 0
+        return pd.DataFrame(columns=colunas), 0
 
     contagem = defaultdict(lambda: {"Vitória": 0, "Empate": 0, "Derrota": 0})
     for r in filtrados:
@@ -233,21 +349,95 @@ def compute_stats(registros, color):
     linhas = []
     for abertura, res in contagem.items():
         n_partidas = res["Vitória"] + res["Empate"] + res["Derrota"]
-        taxa_vitoria = (res["Vitória"] / n_partidas * 100) if n_partidas else 0.0
+        pct = lambda n: round(n / n_partidas * 100, 1) if n_partidas else 0.0
         linhas.append(
             {
                 "Abertura": abertura,
                 "Nº de partidas": n_partidas,
                 "% do total": round(n_partidas / total * 100, 1),
                 "Vitórias": res["Vitória"],
+                "% Vitórias": pct(res["Vitória"]),
                 "Empates": res["Empate"],
+                "% Empates": pct(res["Empate"]),
                 "Derrotas": res["Derrota"],
-                "Taxa de vitória (%)": round(taxa_vitoria, 1),
+                "% Derrotas": pct(res["Derrota"]),
             }
         )
 
     df = pd.DataFrame(linhas).sort_values("Nº de partidas", ascending=False).reset_index(drop=True)
     return df, total
+
+
+def render_donut_grid(df, max_aberturas=6):
+    """
+    Desenha uma grade de gráficos de rosca (donut) em estilo "neon" sobre fundo
+    escuro, um por abertura (as mais jogadas primeiro), mostrando a proporção
+    de Vitórias (verde), Empates (cinza) e Derrotas (vermelho) com percentuais.
+    """
+    df_top = df.head(max_aberturas)
+    n = len(df_top)
+    if n == 0:
+        return
+
+    ncols = 3 if n >= 3 else n
+    nrows = math.ceil(n / ncols)
+
+    fig, axes = plt.subplots(
+        nrows, ncols, figsize=(4 * ncols, 4.3 * nrows), facecolor=COR_FUNDO
+    )
+    # Normaliza `axes` para sempre ser uma lista 1D, independente de nrows/ncols
+    if n == 1:
+        axes_list = [axes]
+    else:
+        axes_list = axes.flatten() if hasattr(axes, "flatten") else list(axes)
+
+    for i, ax in enumerate(axes_list):
+        ax.set_facecolor(COR_FUNDO)
+        if i >= n:
+            ax.axis("off")  # esconde eixos vazios sobrando na grade
+            continue
+
+        row = df_top.iloc[i]
+        valores = [row["Vitórias"], row["Empates"], row["Derrotas"]]
+        cores = [COR_VITORIA, COR_EMPATE, COR_DERROTA]
+
+        # Remove fatias com 0 partidas para não poluir o gráfico
+        valores_validos = [(v, c) for v, c in zip(valores, cores) if v > 0]
+        if not valores_validos:
+            ax.axis("off")
+            continue
+        vals, cols = zip(*valores_validos)
+
+        wedges, _texts, autotexts = ax.pie(
+            vals,
+            colors=cols,
+            autopct="%1.0f%%",
+            pctdistance=0.78,
+            startangle=90,
+            wedgeprops=dict(width=0.42, edgecolor=COR_FUNDO, linewidth=2),
+            textprops=dict(color="white", fontsize=11, fontweight="bold"),
+        )
+        # Número de partidas no centro da rosca
+        ax.text(
+            0, 0, f"{int(row['Nº de partidas'])}\npart.",
+            ha="center", va="center", color="white", fontsize=12, fontweight="bold",
+        )
+        titulo = row["Abertura"]
+        if len(titulo) > 32:
+            titulo = titulo[:29] + "..."
+        ax.set_title(titulo, color="white", fontsize=11, pad=10)
+
+    fig.tight_layout()
+    st.pyplot(fig, use_container_width=True)
+    plt.close(fig)
+
+    # Legenda de cores, já que os gráficos ficam lado a lado
+    st.markdown(
+        f"<span style='color:{COR_VITORIA}'>&#9679;</span> Vitória &nbsp;&nbsp;"
+        f"<span style='color:{COR_EMPATE}'>&#9679;</span> Empate &nbsp;&nbsp;"
+        f"<span style='color:{COR_DERROTA}'>&#9679;</span> Derrota",
+        unsafe_allow_html=True,
+    )
 
 
 def render_color_section(color, df, total):
@@ -267,10 +457,11 @@ def render_color_section(color, df, total):
     st.markdown("**Aberturas mais usadas**")
     st.bar_chart(top_freq)
 
-    # Gráfico de barras: taxa de vitória por abertura (top 10, apenas com >=1 partida)
-    top_taxa = df.head(10).set_index("Abertura")["Taxa de vitória (%)"]
-    st.markdown("**Taxa de vitória por abertura**")
-    st.bar_chart(top_taxa)
+    # Gráficos de rosca (donut) neon: proporção de V/E/D nas aberturas mais usadas
+    st.markdown("**Desempenho por abertura (Vitória / Empate / Derrota)**")
+    if len(df) > 6:
+        st.caption("Mostrando as 6 aberturas mais jogadas.")
+    render_donut_grid(df)
 
 
 def main():
