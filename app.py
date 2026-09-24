@@ -246,23 +246,32 @@ def categorizar_metodo_por_texto(termination_text):
     Categoriza o método de finalização a partir do texto da tag PGN
     'Termination' (usada quando o tabuleiro final não é suficiente para
     identificar o método sozinho — ex: desistência, tempo, acordo mútuo).
-    É uma busca por palavras-chave, já que o formato varia entre plataformas
-    (Chess.com, Lichess etc.).
+    Cobre tanto termos em inglês quanto em português, já que o formato varia
+    entre plataformas e idiomas (ex: Chess.com em pt-BR usa "venceu por
+    desistência", "venceu por tempo", "Empate por repetição" etc.).
     """
     if not termination_text:
         return "Não informado"
     t = termination_text.lower()
-    if "time" in t:
+    if "tempo" in t or "time" in t:
         return "Tempo (flag caiu)"
-    if "resign" in t:
+    if "desist" in t or "resign" in t:
         return "Desistência"
     if "abandon" in t:
         return "Abandono"
-    if "agree" in t:
+    if "acordo" in t or "agree" in t:
         return "Acordo mútuo"
+    if "mate" in t:
+        return "Xeque-mate"
+    if "repet" in t:
+        return "Repetição de posição"
+    if "afoga" in t or "stalemate" in t:
+        return "Afogamento"
+    if "insuficiente" in t or "insufficient" in t:
+        return "Material insuficiente"
     if "50" in t or "fifty" in t:
         return "Regra dos 50 lances"
-    if "infraction" in t or "disqualif" in t or "cheat" in t or "rules" in t:
+    if "infra" in t or "disqualif" in t or "desqualific" in t or "trapa" in t or "cheat" in t:
         return "Infração/Desqualificação"
     if t.strip() == "normal":
         return "Não especificado"
@@ -378,6 +387,10 @@ def parse_pgn(pgn_bytes, player_name):
         # Identifica como a partida terminou (xeque-mate, tempo, abandono etc.)
         metodo = determinar_metodo(board, headers.get("Termination", "").strip())
 
+        # Guarda adversário e data — usados no filtro "ver partidas desta abertura"
+        adversario = black if color == "Brancas" else white
+        data_partida = headers.get("Date", "").strip().replace("?", "").strip(".") or "—"
+
         registros.append(
             {
                 "cor": color,
@@ -385,6 +398,8 @@ def parse_pgn(pgn_bytes, player_name):
                 "resultado": outcome,
                 "lances": format_move_sequence(moves_san),
                 "metodo": metodo,
+                "adversario": adversario or "—",
+                "data": data_partida,
             }
         )
 
@@ -486,6 +501,16 @@ def compute_stats(registros, color):
 
     df = pd.DataFrame(linhas).sort_values("Nº de partidas", ascending=False).reset_index(drop=True)
     return df, total
+
+
+def compute_stats_all(registros):
+    """
+    Mesma lógica de compute_stats, mas somando Brancas + Pretas juntas
+    (usado na aba de comparação entre jogadores, onde queremos um resumo
+    geral em vez de separado por cor).
+    """
+    registros_unificados = [dict(r, cor="Todas") for r in registros]
+    return compute_stats(registros_unificados, "Todas")
 
 
 def compute_method_stats(registros, color):
@@ -610,15 +635,19 @@ def render_donut_grid(df, max_aberturas=6):
     st.markdown(estilo + grid, unsafe_allow_html=True)
 
 
-def render_barras_horizontais(itens, cor_barra, unidade=""):
+def render_barras_horizontais(itens, cor_barra, unidade="", bicolor=False):
     """
     Desenha uma lista de barras horizontais em CSS puro — usada tanto para
     "aberturas mais usadas" quanto para "métodos de finalização". Muito mais
     legível que um gráfico de colunas quando os rótulos (nomes de aberturas,
     métodos) são longos, pois o texto fica na horizontal, sem cortar/rotacionar.
 
-    `itens`: lista de dicts {"label": str, "valor": num, "pct": num}
-    `cor_barra`: cor de preenchimento das barras
+    `itens`: lista de dicts {"label": str, "valor": num, "pct": num}. No modo
+    `bicolor=True`, cada item também precisa de "pct_vitoria" e "pct_derrota"
+    (0-100): o comprimento total da barra continua representando a frequência,
+    mas o preenchimento é dividido em verde (% vitória) e vermelho (% derrota)
+    daquela abertura, nas mesmas cores dos donuts.
+    `cor_barra`: cor de preenchimento das barras (ignorado se bicolor=True).
     `unidade`: texto mostrado ao lado do valor (ex: "partidas")
     """
     if not itens:
@@ -630,8 +659,8 @@ def render_barras_horizontais(itens, cor_barra, unidade=""):
         ".barra-item { display: flex; align-items: center; gap: 12px; }",
         ".barra-label { width: 220px; flex-shrink: 0; color: #E5E7EB; font-size: 13px; "
         "white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }",
-        f'.barra-track {{ flex: 1; background: {COR_TRILHA_BARRA}; border-radius: 8px; height: 16px; overflow: hidden; }}',
-        ".barra-fill { height: 100%; border-radius: 8px; }",
+        f'.barra-track {{ flex: 1; background: {COR_TRILHA_BARRA}; border-radius: 8px; height: 16px; overflow: hidden; display: flex; }}',
+        ".barra-fill { height: 100%; }",
         f'.barra-valor {{ min-width: 92px; text-align: right; color: {COR_TEXTO_SECUNDARIO}; font-size: 12px; white-space: nowrap; }}',
         "</style>"]
 
@@ -645,7 +674,17 @@ def render_barras_horizontais(itens, cor_barra, unidade=""):
         linhas.append('<div class="barra-item">')
         linhas.append(f'<div class="barra-label" title="{label}">{label}</div>')
         linhas.append('<div class="barra-track">')
-        linhas.append(f'<div class="barra-fill" style="width:{largura_pct:.1f}%; background:{cor_barra};"></div>')
+        if bicolor:
+            # Divide o comprimento total da barra (largura_pct) proporcionalmente
+            # entre vitória (verde) e derrota (vermelho) daquela abertura
+            pv = item.get("pct_vitoria", 0)
+            pd_ = item.get("pct_derrota", 0)
+            largura_v = largura_pct * (pv / 100)
+            largura_d = largura_pct * (pd_ / 100)
+            linhas.append(f'<div class="barra-fill" style="width:{largura_v:.1f}%; background:{COR_VITORIA}; border-radius:8px 0 0 8px;"></div>')
+            linhas.append(f'<div class="barra-fill" style="width:{largura_d:.1f}%; background:{COR_DERROTA}; border-radius:0 8px 8px 0;"></div>')
+        else:
+            linhas.append(f'<div class="barra-fill" style="width:{largura_pct:.1f}%; background:{cor_barra}; border-radius:8px;"></div>')
         linhas.append("</div>")
         linhas.append(f'<div class="barra-valor">{texto_valor}</div>')
         linhas.append("</div>")
@@ -680,7 +719,7 @@ def render_metodos_section(method_stats):
             render_barras_horizontais(itens, cor_barra=cor)
 
 
-def render_color_section(color, df, total, method_stats):
+def render_color_section(color, df, total, method_stats, registros_cor):
     """Renderiza a seção de estatísticas (tabela + gráficos) para uma cor."""
     emoji = "⚪" if color == "Brancas" else "⚫"
     st.subheader(f"{emoji} Jogando de {color}")
@@ -700,13 +739,37 @@ def render_color_section(color, df, total, method_stats):
 
     # Frequência de uso das aberturas: barras horizontais em CSS (mais legível
     # que um gráfico de colunas quando os nomes das aberturas são longos)
-    st.markdown("**Aberturas mais usadas**")
+    col_titulo, col_toggle = st.columns([3, 2])
+    with col_titulo:
+        st.markdown("**Aberturas mais usadas**")
+    with col_toggle:
+        bicolor = st.toggle(
+            "Colorir por desempenho (Vitória/Derrota)",
+            key=f"toggle_bicolor_{color}",
+        )
+
     top_freq = df.head(10)
-    itens_freq = [
-        {"label": row["Abertura"], "valor": int(row["Nº de partidas"]), "pct": row["% do total"]}
-        for _, row in top_freq.iterrows()
-    ]
-    render_barras_horizontais(itens_freq, cor_barra=COR_ACCENT, unidade=" partidas")
+    if bicolor:
+        itens_freq = [
+            {
+                "label": row["Abertura"],
+                "valor": int(row["Nº de partidas"]),
+                "pct_vitoria": row["% Vitórias"],
+                "pct_derrota": row["% Derrotas"],
+            }
+            for _, row in top_freq.iterrows()
+        ]
+        render_barras_horizontais(itens_freq, cor_barra=COR_ACCENT, unidade=" partidas", bicolor=True)
+        st.caption(
+            "Cada barra mantém o comprimento total (frequência), mas o preenchimento "
+            "é dividido em verde (% vitória) e vermelho (% derrota) daquela abertura."
+        )
+    else:
+        itens_freq = [
+            {"label": row["Abertura"], "valor": int(row["Nº de partidas"]), "pct": row["% do total"]}
+            for _, row in top_freq.iterrows()
+        ]
+        render_barras_horizontais(itens_freq, cor_barra=COR_ACCENT, unidade=" partidas")
 
     # Gráficos de rosca (donut): proporção de V/E/D nas aberturas mais usadas
     st.markdown("**Desempenho por abertura (Vitória / Empate / Derrota)**")
@@ -718,10 +781,195 @@ def render_color_section(color, df, total, method_stats):
     st.markdown("**Método de finalização**")
     render_metodos_section(method_stats)
 
+    # Filtro: ver as partidas de uma abertura específica
+    st.markdown("**🔍 Ver partidas de uma abertura específica**")
+    opcoes = ["Selecione uma abertura..."] + list(df["Abertura"])
+    escolha = st.selectbox(
+        "Abertura", opcoes, key=f"sel_abertura_{color}", label_visibility="collapsed"
+    )
+    if escolha != opcoes[0]:
+        partidas_da_abertura = [r for r in registros_cor if r["abertura"] == escolha]
+        tabela_partidas = pd.DataFrame(
+            [
+                {
+                    "Data": r.get("data", "—"),
+                    "Adversário": r.get("adversario", "—"),
+                    "Resultado": r["resultado"],
+                    "Método": r.get("metodo", "—"),
+                    "Lances": r.get("lances", ""),
+                }
+                for r in partidas_da_abertura
+            ]
+        )
+        st.caption(f"{len(partidas_da_abertura)} partida(s) com esta abertura.")
+        st.dataframe(tabela_partidas, use_container_width=True, hide_index=True)
 
-def main():
-    st.set_page_config(page_title="Analisador de Aberturas de Xadrez", page_icon="♟️", layout="wide")
-    st.title("♟️ Analisador de Repertório de Aberturas")
+
+def render_compare_tab():
+    """
+    Aba de comparação: recebe até 2 arquivos PGN (pode ser o mesmo arquivo
+    duas vezes) e o nome de 2 jogadores, e mostra um resumo geral
+    (Brancas+Pretas juntas) lado a lado.
+    """
+    st.write(
+        "Envie um PGN e o nome de cada jogador para comparar o repertório "
+        "geral dos dois lado a lado (pode ser o mesmo arquivo, com dois "
+        "nomes diferentes)."
+    )
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.markdown("**Jogador A**")
+        arquivo_a = st.file_uploader("PGN — Jogador A", type=["pgn"], key="cmp_file_a")
+        nome_a = st.text_input("Nome exato — Jogador A", key="cmp_name_a")
+    with col_b:
+        st.markdown("**Jogador B**")
+        arquivo_b = st.file_uploader("PGN — Jogador B", type=["pgn"], key="cmp_file_b")
+        nome_b = st.text_input("Nome exato — Jogador B", key="cmp_name_b")
+
+    if not (arquivo_a and nome_a and arquivo_b and nome_b):
+        st.info("Preencha o arquivo e o nome dos dois jogadores para comparar.")
+        return
+
+    with st.spinner("Comparando..."):
+        regs_a, _, total_lidas_a = parse_pgn(arquivo_a.read(), nome_a)
+        regs_b, _, total_lidas_b = parse_pgn(arquivo_b.read(), nome_b)
+
+    if not regs_a or not regs_b:
+        faltando = nome_a if not regs_a else nome_b
+        st.warning(f"Não encontrei partidas de '{faltando}' no PGN correspondente. Confira o nome exato.")
+        return
+
+    df_a, total_a = compute_stats_all(regs_a)
+    df_b, total_b = compute_stats_all(regs_b)
+
+    def resumo_geral(registros):
+        c = Counter(r["resultado"] for r in registros)
+        total = len(registros)
+        return {
+            "total": total,
+            "v": c.get("Vitória", 0),
+            "e": c.get("Empate", 0),
+            "d": c.get("Derrota", 0),
+            "pct_v": round(c.get("Vitória", 0) / total * 100, 1) if total else 0,
+        }
+
+    resumo_a, resumo_b = resumo_geral(regs_a), resumo_geral(regs_b)
+
+    st.divider()
+    col_a, col_b = st.columns(2)
+    for coluna, nome, resumo, df_j in ((col_a, nome_a, resumo_a, df_a), (col_b, nome_b, resumo_b, df_b)):
+        with coluna:
+            st.subheader(nome)
+            st.metric("Partidas analisadas", resumo["total"])
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Vitórias", resumo["v"], f'{resumo["pct_v"]}%')
+            m2.metric("Empates", resumo["e"])
+            m3.metric("Derrotas", resumo["d"])
+            st.markdown("**Aberturas mais usadas**")
+            top5 = df_j.head(5)
+            if top5.empty:
+                st.caption("Sem dados suficientes.")
+            else:
+                itens = [
+                    {"label": row["Abertura"], "valor": int(row["Nº de partidas"]), "pct": row["% do total"]}
+                    for _, row in top5.iterrows()
+                ]
+                render_barras_horizontais(itens, cor_barra=COR_ACCENT, unidade=" partidas")
+
+    # Comparação direta das aberturas em comum
+    aberturas_comuns = set(df_a["Abertura"]) & set(df_b["Abertura"])
+    if aberturas_comuns:
+        st.markdown("**Aberturas que os dois jogam**")
+        linhas = []
+        for abertura in aberturas_comuns:
+            la = df_a[df_a["Abertura"] == abertura].iloc[0]
+            lb = df_b[df_b["Abertura"] == abertura].iloc[0]
+            linhas.append(
+                {
+                    "Abertura": abertura,
+                    f"{nome_a} — partidas": int(la["Nº de partidas"]),
+                    f"{nome_a} — % vitórias": la["% Vitórias"],
+                    f"{nome_b} — partidas": int(lb["Nº de partidas"]),
+                    f"{nome_b} — % vitórias": lb["% Vitórias"],
+                }
+            )
+        st.dataframe(pd.DataFrame(linhas), use_container_width=True, hide_index=True)
+
+
+def inject_theme():
+    """
+    Injeta CSS para dar uma identidade visual mais forte ao app: fundo
+    escuro em gradiente, "manchas" de cor com leve desfoque (aurora) que se
+    movem sozinhas, uma textura de tabuleiro bem sutil e peças de xadrez
+    decorativas ao fundo.
+
+    Observação técnica: um parallax de verdade (ligado à posição de scroll,
+    via JavaScript) não é confiável dentro do Streamlit — o `st.markdown`
+    insere HTML no DOM, mas o navegador não executa tags <script> inseridas
+    dessa forma por segurança. Por isso o efeito de profundidade aqui é
+    puramente em CSS (animações @keyframes independentes de scroll), o que
+    é mais simples e roda de forma confiável.
+    Como isso depende de seletores internos do Streamlit (".stApp"), pode
+    variar ou quebrar em versões futuras do Streamlit.
+    """
+    st.markdown(
+        f"""
+        <style>
+        .stApp {{ background: {COR_FUNDO}; }}
+
+        .bg-checker {{
+            position: fixed; inset: 0; z-index: -4; pointer-events: none;
+            background-image:
+                linear-gradient(45deg, rgba(255,255,255,0.02) 25%, transparent 25%, transparent 75%, rgba(255,255,255,0.02) 75%),
+                linear-gradient(45deg, rgba(255,255,255,0.02) 25%, transparent 25%, transparent 75%, rgba(255,255,255,0.02) 75%);
+            background-size: 64px 64px;
+            background-position: 0 0, 32px 32px;
+        }}
+
+        .aurora-blob {{
+            position: fixed; border-radius: 50%; filter: blur(70px);
+            pointer-events: none; z-index: -3;
+            animation: drift 24s ease-in-out infinite alternate;
+        }}
+        .blob1 {{ width: 480px; height: 480px; top: -120px; left: -100px; background: radial-gradient(circle, rgba(167,139,250,0.28), transparent 70%); }}
+        .blob2 {{ width: 560px; height: 560px; top: 40vh; right: -160px; background: radial-gradient(circle, rgba(96,165,250,0.22), transparent 70%); animation-delay: -8s; }}
+        .blob3 {{ width: 460px; height: 460px; bottom: -140px; left: 10%; background: radial-gradient(circle, rgba(52,211,153,0.18), transparent 70%); animation-delay: -14s; }}
+        @keyframes drift {{
+            0%   {{ transform: translate(0, 0) scale(1); }}
+            50%  {{ transform: translate(30px, -20px) scale(1.06); }}
+            100% {{ transform: translate(-25px, 18px) scale(0.96); }}
+        }}
+
+        .chess-deco {{
+            position: fixed; z-index: -2; pointer-events: none; user-select: none;
+            line-height: 1; color: rgba(167, 139, 250, 0.06);
+        }}
+        .chess-deco.n2 {{ color: rgba(96, 165, 250, 0.06); }}
+        .chess-deco.n3 {{ color: rgba(52, 211, 153, 0.055); }}
+
+        h1, .hero-title {{
+            background: linear-gradient(90deg, #FFFFFF, #A78BFA);
+            -webkit-background-clip: text; background-clip: text; color: transparent !important;
+        }}
+        </style>
+
+        <div class="bg-checker"></div>
+        <div class="aurora-blob blob1"></div>
+        <div class="aurora-blob blob2"></div>
+        <div class="aurora-blob blob3"></div>
+
+        <span class="chess-deco" style="top:2%; left:4%; font-size:130px; transform:rotate(-8deg);">♞</span>
+        <span class="chess-deco n2" style="top:60%; left:85%; font-size:150px; transform:rotate(10deg);">♜</span>
+        <span class="chess-deco n3" style="top:80%; left:8%; font-size:110px; transform:rotate(6deg);">♟</span>
+        <span class="chess-deco n2" style="top:25%; left:92%; font-size:90px; transform:rotate(-6deg);">♗</span>
+        <span class="chess-deco" style="top:45%; left:2%; font-size:100px; transform:rotate(5deg);">♛</span>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_single_player_tab():
+    """Aba original: analisar um único jogador, separado por cor."""
     st.write(
         "Envie um arquivo PGN com uma ou mais partidas e informe o nome exato "
         "do jogador (como aparece nas tags White/Black do PGN) para ver as "
@@ -775,10 +1023,24 @@ def main():
     df_pretas, total_pretas = compute_stats(registros, "Pretas")
     metodos_brancas = compute_method_stats(registros, "Brancas")
     metodos_pretas = compute_method_stats(registros, "Pretas")
+    registros_brancas = [r for r in registros if r["cor"] == "Brancas"]
+    registros_pretas = [r for r in registros if r["cor"] == "Pretas"]
 
-    render_color_section("Brancas", df_brancas, total_brancas, metodos_brancas)
+    render_color_section("Brancas", df_brancas, total_brancas, metodos_brancas, registros_brancas)
     st.divider()
-    render_color_section("Pretas", df_pretas, total_pretas, metodos_pretas)
+    render_color_section("Pretas", df_pretas, total_pretas, metodos_pretas, registros_pretas)
+
+
+def main():
+    st.set_page_config(page_title="Analisador de Aberturas de Xadrez", page_icon="♟️", layout="wide")
+    inject_theme()
+    st.title("♟️ Analisador de Repertório de Aberturas")
+
+    aba_individual, aba_comparar = st.tabs(["Analisar jogador", "⚔️ Comparar jogadores"])
+    with aba_individual:
+        render_single_player_tab()
+    with aba_comparar:
+        render_compare_tab()
 
 
 if __name__ == "__main__":
