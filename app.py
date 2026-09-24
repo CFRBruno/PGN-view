@@ -12,6 +12,7 @@ Como rodar:
 """
 
 import io
+import urllib.parse
 from collections import Counter, defaultdict
 
 import chess
@@ -32,6 +33,23 @@ COR_CARD_BORDA = "#2A3140"
 COR_TEXTO_SECUNDARIO = "#9CA3AF"
 COR_TRILHA_BARRA = "#232935"   # fundo (trilha) das barras horizontais
 COR_ACCENT = "#60A5FA"     # azul suave, usado nas barras de frequência de aberturas
+
+# ---------------------------------------------------------------------------
+# Peças de xadrez decorativas, como uma pequena imagem SVG (mosaico repetido
+# no fundo). Construída como "background-image" do próprio container do
+# Streamlit (.stApp) — em vez de elementos <div>/<span> separados — porque o
+# Streamlit envolve cada bloco de st.markdown em seu próprio container, que
+# pode recortar/esconder elementos com position:fixed lá dentro. Como
+# background-image do container principal, não tem esse problema.
+# ---------------------------------------------------------------------------
+_CHESS_WATERMARK_SVG = """<svg xmlns='http://www.w3.org/2000/svg' width='320' height='320'>
+<text x='6' y='80' font-size='78' fill='#A78BFA' opacity='0.09'>&#9822;</text>
+<text x='180' y='55' font-size='60' fill='#60A5FA' opacity='0.10'>&#9814;</text>
+<text x='95' y='185' font-size='64' fill='#34D399' opacity='0.09'>&#9823;</text>
+<text x='225' y='250' font-size='60' fill='#A78BFA' opacity='0.09'>&#9815;</text>
+<text x='15' y='280' font-size='52' fill='#60A5FA' opacity='0.09'>&#9819;</text>
+</svg>"""
+_CHESS_WATERMARK_DATA_URI = "data:image/svg+xml," + urllib.parse.quote(_CHESS_WATERMARK_SVG, safe="")
 
 # ---------------------------------------------------------------------------
 # Tabela de fallback: mapeia sequências iniciais de lances (em SAN, separados
@@ -899,70 +917,52 @@ def render_compare_tab():
 def inject_theme():
     """
     Injeta CSS para dar uma identidade visual mais forte ao app: fundo
-    escuro em gradiente, "manchas" de cor com leve desfoque (aurora) que se
-    movem sozinhas, uma textura de tabuleiro bem sutil e peças de xadrez
-    decorativas ao fundo.
+    escuro com "manchas" de gradiente coloridas (aurora), textura sutil de
+    tabuleiro e peças de xadrez decorativas.
+
+    Tudo é aplicado como camadas de `background-image` do próprio container
+    do Streamlit (`.stApp`), e não como elementos HTML extras — na primeira
+    tentativa eu tinha criado <div>/<span> com `position: fixed` para isso,
+    mas o Streamlit encapsula cada bloco de `st.markdown` no seu próprio
+    container, que corta/esconde `position: fixed` lá dentro; por isso nada
+    aparecia. Como camada de fundo do `.stApp` (que é o container real e
+    completo da página), esse problema não existe.
 
     Observação técnica: um parallax de verdade (ligado à posição de scroll,
     via JavaScript) não é confiável dentro do Streamlit — o `st.markdown`
     insere HTML no DOM, mas o navegador não executa tags <script> inseridas
-    dessa forma por segurança. Por isso o efeito de profundidade aqui é
-    puramente em CSS (animações @keyframes independentes de scroll), o que
-    é mais simples e roda de forma confiável.
-    Como isso depende de seletores internos do Streamlit (".stApp"), pode
-    variar ou quebrar em versões futuras do Streamlit.
+    dessa forma por segurança. O efeito de profundidade aqui é uma animação
+    de CSS puro (movendo a posição do fundo com @keyframes), independente
+    de scroll. Como isso depende de um seletor interno do Streamlit
+    (".stApp"), pode variar ou quebrar em versões futuras do Streamlit.
     """
     st.markdown(
         f"""
         <style>
-        .stApp {{ background: {COR_FUNDO}; }}
-
-        .bg-checker {{
-            position: fixed; inset: 0; z-index: -4; pointer-events: none;
+        .stApp {{
+            background-color: {COR_FUNDO};
             background-image:
-                linear-gradient(45deg, rgba(255,255,255,0.02) 25%, transparent 25%, transparent 75%, rgba(255,255,255,0.02) 75%),
-                linear-gradient(45deg, rgba(255,255,255,0.02) 25%, transparent 25%, transparent 75%, rgba(255,255,255,0.02) 75%);
-            background-size: 64px 64px;
-            background-position: 0 0, 32px 32px;
+                radial-gradient(circle, rgba(167,139,250,0.22), transparent 65%),
+                radial-gradient(circle, rgba(96,165,250,0.18), transparent 65%),
+                radial-gradient(circle, rgba(52,211,153,0.16), transparent 65%),
+                linear-gradient(45deg, rgba(255,255,255,0.025) 25%, transparent 25%, transparent 75%, rgba(255,255,255,0.025) 75%),
+                linear-gradient(45deg, rgba(255,255,255,0.025) 25%, transparent 25%, transparent 75%, rgba(255,255,255,0.025) 75%),
+                url("{_CHESS_WATERMARK_DATA_URI}");
+            background-repeat: no-repeat, no-repeat, no-repeat, repeat, repeat, repeat;
+            background-size: 900px 900px, 800px 800px, 750px 750px, 64px 64px, 64px 64px, 320px 320px;
+            background-position: 0% 0%, 100% 15%, 10% 100%, 0 0, 32px 32px, 0 0;
+            animation: bg-drift 28s ease-in-out infinite alternate;
         }}
-
-        .aurora-blob {{
-            position: fixed; border-radius: 50%; filter: blur(70px);
-            pointer-events: none; z-index: -3;
-            animation: drift 24s ease-in-out infinite alternate;
+        @keyframes bg-drift {{
+            0%   {{ background-position: 0% 0%,   100% 15%, 10% 100%, 0 0, 32px 32px, 0 0; }}
+            50%  {{ background-position: 4% 6%,    94% 10%,  16% 94%, 6px 6px, 38px 38px, 20px 16px; }}
+            100% {{ background-position: -3% 3%,  100% 20%,  8% 96%, 0 0, 32px 32px, 0 0; }}
         }}
-        .blob1 {{ width: 480px; height: 480px; top: -120px; left: -100px; background: radial-gradient(circle, rgba(167,139,250,0.28), transparent 70%); }}
-        .blob2 {{ width: 560px; height: 560px; top: 40vh; right: -160px; background: radial-gradient(circle, rgba(96,165,250,0.22), transparent 70%); animation-delay: -8s; }}
-        .blob3 {{ width: 460px; height: 460px; bottom: -140px; left: 10%; background: radial-gradient(circle, rgba(52,211,153,0.18), transparent 70%); animation-delay: -14s; }}
-        @keyframes drift {{
-            0%   {{ transform: translate(0, 0) scale(1); }}
-            50%  {{ transform: translate(30px, -20px) scale(1.06); }}
-            100% {{ transform: translate(-25px, 18px) scale(0.96); }}
-        }}
-
-        .chess-deco {{
-            position: fixed; z-index: -2; pointer-events: none; user-select: none;
-            line-height: 1; color: rgba(167, 139, 250, 0.06);
-        }}
-        .chess-deco.n2 {{ color: rgba(96, 165, 250, 0.06); }}
-        .chess-deco.n3 {{ color: rgba(52, 211, 153, 0.055); }}
-
-        h1, .hero-title {{
+        h1 {{
             background: linear-gradient(90deg, #FFFFFF, #A78BFA);
             -webkit-background-clip: text; background-clip: text; color: transparent !important;
         }}
         </style>
-
-        <div class="bg-checker"></div>
-        <div class="aurora-blob blob1"></div>
-        <div class="aurora-blob blob2"></div>
-        <div class="aurora-blob blob3"></div>
-
-        <span class="chess-deco" style="top:2%; left:4%; font-size:130px; transform:rotate(-8deg);">♞</span>
-        <span class="chess-deco n2" style="top:60%; left:85%; font-size:150px; transform:rotate(10deg);">♜</span>
-        <span class="chess-deco n3" style="top:80%; left:8%; font-size:110px; transform:rotate(6deg);">♟</span>
-        <span class="chess-deco n2" style="top:25%; left:92%; font-size:90px; transform:rotate(-6deg);">♗</span>
-        <span class="chess-deco" style="top:45%; left:2%; font-size:100px; transform:rotate(5deg);">♛</span>
         """,
         unsafe_allow_html=True,
     )
